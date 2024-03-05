@@ -36,7 +36,6 @@ func parseDiff(diff string) string {
 	return diff[:i]
 }
 
-// TODO: Receive the dangerous workflow as parameter
 func GeneratePatch(f checker.File, content []byte) string {
 	src := string(content)
 	//TODO: call fix method
