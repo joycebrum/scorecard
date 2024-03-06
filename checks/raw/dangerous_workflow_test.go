@@ -159,9 +159,6 @@ func TestGithubDangerousWorkflow(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			mockRepoClient := mockrepo.NewMockRepoClient(ctrl)
 			mockRepoClient.EXPECT().ListFiles(gomock.Any()).Return([]string{tt.filename}, nil)
-			mockRepoClient.EXPECT().LocalPath().DoAndReturn(func() (string, error) {
-				return "test_path", nil
-			}).AnyTimes()
 			mockRepoClient.EXPECT().GetFileContent(gomock.Any()).DoAndReturn(func(file string) ([]byte, error) {
 				// This will read the file and return the content
 				content, err := os.ReadFile("../testdata/" + file)

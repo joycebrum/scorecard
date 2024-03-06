@@ -50,8 +50,9 @@ func Run(raw *checker.RawResults) ([]finding.Finding, string, error) {
 	}
 
 	var findings []finding.Finding
-	var currentWp string
+	var curr string
 	var content []byte
+	localPath := raw.Metadata.Metadata["localPath"]
 	for _, e := range r.Workflows {
 		e := e
 		if e.Type == checker.DangerousWorkflowScriptInjection {
@@ -68,9 +69,9 @@ func Run(raw *checker.RawResults) ([]finding.Finding, string, error) {
 				Snippet:   &e.File.Snippet,
 			})
 
-			wp := path.Join(e.File.LocalPath, e.File.Path)
-			if currentWp != wp {
-				currentWp = wp
+			wp := path.Join(localPath, e.File.Path)
+			if curr != wp {
+				curr = wp
 				content, _ = os.ReadFile(wp)
 			}
 			if content != nil {
