@@ -50,7 +50,8 @@ func Run(raw *checker.RawResults) ([]finding.Finding, string, error) {
 	}
 
 	var findings []finding.Finding
-	contents := make(map[string][]byte)
+	var currentWp string
+	var content []byte
 	for _, e := range r.Workflows {
 		e := e
 		if e.Type == checker.DangerousWorkflowScriptInjection {
@@ -68,11 +69,12 @@ func Run(raw *checker.RawResults) ([]finding.Finding, string, error) {
 			})
 
 			wp := path.Join(e.File.LocalPath, e.File.Path)
-			if ok := contents[wp]; ok == nil {
-				contents[wp], _ = os.ReadFile(wp)
+			if currentWp != wp {
+				currentWp = wp
+				content, _ = os.ReadFile(wp)
 			}
-			if contents[wp] != nil {
-				patch := patch.GeneratePatch(e.File, contents[wp])
+			if content != nil {
+				patch := patch.GeneratePatch(e.File, content)
 				f.WithPatch(&patch)
 			}
 			findings = append(findings, *f)
