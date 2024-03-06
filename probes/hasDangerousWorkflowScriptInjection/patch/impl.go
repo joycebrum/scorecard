@@ -39,7 +39,7 @@ func parseDiff(diff string) string {
 func GeneratePatch(f checker.File, content []byte) string {
 	src := string(content)
 	//TODO: call fix method
-	dst := src
+	dst := src + "\n    # random change for testing patch diff"
 
 	return parseDiff(cmp.Diff(src, dst))
 }
