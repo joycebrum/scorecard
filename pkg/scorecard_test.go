@@ -225,6 +225,7 @@ func TestExperimentalRunProbes(t *testing.T) {
 							"repository.name":          "ossf/scorecard",
 							"repository.sha1":          "1a17bb812fb2ac23e9d09e86e122f8b67563aed7",
 							"repository.uri":           "github.com/ossf/scorecard",
+							"localPath":                "test_path",
 						},
 					},
 				},
@@ -260,6 +261,9 @@ func TestExperimentalRunProbes(t *testing.T) {
 			t.Parallel()
 			ctrl := gomock.NewController(t)
 			mockRepoClient := mockrepo.NewMockRepoClient(ctrl)
+			mockRepoClient.EXPECT().LocalPath().DoAndReturn(func() (string, error) {
+				return "test_path", nil
+			}).AnyTimes()
 			repo := mockrepo.NewMockRepo(ctrl)
 
 			repo.EXPECT().URI().Return(tt.args.uri).AnyTimes()
