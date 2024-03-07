@@ -72,11 +72,11 @@ func Run(raw *checker.RawResults) ([]finding.Finding, string, error) {
 			wp := path.Join(localPath, e.File.Path)
 			if curr != wp {
 				curr = wp
-				content, _ = os.ReadFile(wp)
+				content, err = os.ReadFile(wp)
 			}
-			if content != nil {
-				patch := patch.GeneratePatch(e.File, content)
-				f.WithPatch(&patch)
+			if err == nil {
+				findingPatch := patch.GeneratePatch(e.File, content)
+				f.WithPatch(&findingPatch)
 			}
 			findings = append(findings, *f)
 		}

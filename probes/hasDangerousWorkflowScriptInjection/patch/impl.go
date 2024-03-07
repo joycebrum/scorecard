@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/google/go-cmp/cmp"
+
 	"github.com/ossf/scorecard/v4/checker"
 )
 
@@ -26,19 +27,19 @@ func parseDiff(diff string) string {
 	if i == -1 {
 		return diff
 	}
-	//remove everything before """\n
+
 	diff = diff[i+4:]
 	i = strings.LastIndex(diff, "\"\"\"")
 	if i == -1 {
 		return diff
 	}
-	//remove everything after \n  \t"""
+
 	return diff[:i]
 }
 
 func GeneratePatch(f checker.File, content []byte) string {
 	src := string(content)
-	//TODO: call fix method
+	// TODO: call fix method
 	dst := src + "\n    # random change for testing patch diff"
 
 	return parseDiff(cmp.Diff(src, dst))
