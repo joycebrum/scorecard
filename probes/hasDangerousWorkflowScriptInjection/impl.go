@@ -51,35 +51,39 @@ func Run(raw *checker.RawResults) ([]finding.Finding, string, error) {
 
 	var findings []finding.Finding
 	var curr string
-	var content []byte
+	var content string
 	localPath := raw.Metadata.Metadata["localPath"]
-	for _, e := range r.Workflows {
-		e := e
-		if e.Type == checker.DangerousWorkflowScriptInjection {
-			f, err := finding.NewWith(fs, Probe,
-				fmt.Sprintf("script injection with untrusted input '%v'", e.File.Snippet),
-				nil, finding.OutcomeNegative)
-			if err != nil {
-				return nil, Probe, fmt.Errorf("create finding: %w", err)
-			}
-			f = f.WithLocation(&finding.Location{
-				Path:      e.File.Path,
-				Type:      e.File.Type,
-				LineStart: &e.File.Offset,
-				Snippet:   &e.File.Snippet,
-			})
-
-			wp := path.Join(localPath, e.File.Path)
-			if curr != wp {
-				curr = wp
-				content, err = os.ReadFile(wp)
-			}
-			if err == nil {
-				findingPatch := patch.GeneratePatch(e.File, content)
-				f.WithPatch(&findingPatch)
-			}
-			findings = append(findings, *f)
+	for _, w := range r.Workflows {
+		w := w
+		if w.Type != checker.DangerousWorkflowScriptInjection {
+			continue
 		}
+
+		f, err := finding.NewWith(fs, Probe,
+			fmt.Sprintf("script injection with untrusted input '%v'", w.File.Snippet),
+			nil, finding.OutcomeNegative)
+		if err != nil {
+			return nil, Probe, fmt.Errorf("create finding: %w", err)
+		}
+		f = f.WithLocation(&finding.Location{
+			Path:      w.File.Path,
+			Type:      w.File.Type,
+			LineStart: &w.File.Offset,
+			Snippet:   &w.File.Snippet,
+		})
+
+		wp := path.Join(localPath, w.File.Path)
+		if curr != wp {
+			curr = wp
+			var c []byte
+			c, err = os.ReadFile(wp)
+			content = string(c)
+		}
+		if err == nil {
+			findingPatch := patch.GeneratePatch(w.File, content)
+			f.WithPatch(&findingPatch)
+		}
+		findings = append(findings, *f)
 	}
 	if len(findings) == 0 {
 		return positiveOutcome()
