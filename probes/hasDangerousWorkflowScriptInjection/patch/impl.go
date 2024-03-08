@@ -29,13 +29,11 @@ package patch
 
 import (
 	"fmt"
-	"os"
 	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/ossf/scorecard/v4/checker"
-	sce "github.com/ossf/scorecard/v4/errors"
 
 	"github.com/hexops/gotextdiff"
 	"github.com/hexops/gotextdiff/myers"
@@ -46,51 +44,27 @@ const (
 	assumedIndent = 2
 )
 
-func GeneratePatch(f checker.File) string {
-	// for testing, while we figure out how to get the full path
-	// path := path.Join("/home/pnacht_google_com/temp_test", f.Path)
-	path := f.Path
+func GeneratePatch(f checker.File, content string) string {
 	unsafeVar := strings.Trim(f.Snippet, " ")
 	runCmdIndex := f.Offset - 1
 
-	ow, err := os.ReadFile(path)
+	lines := strings.Split(string(content), "\n")
 
-	if err != nil {
+	unsafePattern, envvar, ok := getReplacementRegexAndEnvvarName(unsafeVar)
+	if !ok {
 		return ""
-	}
-	originalWorkflow := string(ow)
-
-	lines := strings.Split(string(originalWorkflow), "\n")
-
-	unsafePattern, envvar, err := getReplacementRegexAndEnvvarName(unsafeVar)
-	if err != nil {
-		fmt.Printf("%v", err)
 	}
 
 	replaceUnsafeVarWithEnvvar(lines, unsafePattern, envvar, runCmdIndex)
 
-	lines, ok := addEnvvarsToGlobalEnv(lines, envvar, unsafeVar)
+	lines, ok = addEnvvarsToGlobalEnv(lines, envvar, unsafeVar)
 	if !ok {
 		return ""
 	}
 
 	fixedWorkflow := strings.Join(lines, "\n")
 
-	return getDiff(f.Path, path, originalWorkflow, fixedWorkflow)
-}
-
-func getDiff(displayPath, fullPath, original, patched string) string {
-	// gets the changes as a git-diff. Following the standard used in git diff, the
-	// path to the "old" version is prefixed with a/, and the "new" with b/:
-	//
-	// --- a/.github/workflows/foo.yml
-	// +++ b/.github/workflows/foo.yml
-	// @@ -42,13 + 42,22 @@
-	// ...
-	edits := myers.ComputeEdits(span.URIFromPath(fullPath), original, patched)
-	aPath := "a/" + displayPath
-	bPath := "b/" + displayPath
-	return fmt.Sprint(gotextdiff.ToUnified(aPath, bPath, original, edits))
+	return getDiff(f.Path, content, fixedWorkflow)
 }
 
 func addEnvvarsToGlobalEnv(lines []string, envvar string, unsafeVar string) ([]string, bool) {
@@ -113,7 +87,7 @@ func addEnvvarsToGlobalEnv(lines []string, envvar string, unsafeVar string) ([]s
 		envPos += 1
 		envvarIndent = globalIndentation + assumedIndent
 	}
-	envvarDefinition := fmt.Sprintf("%s: %s", envvar, unsafeVar)
+	envvarDefinition := fmt.Sprintf("%s: ${{ %s }}", envvar, unsafeVar)
 	lines = slices.Insert(lines, envPos,
 		strings.Repeat(" ", envvarIndent)+envvarDefinition)
 	return lines, ok
@@ -226,16 +200,13 @@ var unsafePatterns = []unsafePattern{
 	newUnsafePattern("HEAD_REF", `github\.head_ref`),
 }
 
-func getReplacementRegexAndEnvvarName(unsafeVar string) (*regexp.Regexp, string, error) {
+func getReplacementRegexAndEnvvarName(unsafeVar string) (*regexp.Regexp, string, bool) {
 	for _, p := range unsafePatterns {
 		if p.idRegex.MatchString(unsafeVar) {
-			return p.replaceRegex, p.envvarName, nil
+			return p.replaceRegex, p.envvarName, true
 		}
 	}
-	return nil, "", sce.WithMessage(sce.ErrScorecardInternal,
-		fmt.Sprintf(
-			"Detected unsafe variable '%s', but could not find a compatible envvar name",
-			unsafeVar))
+	return nil, "", false
 }
 
 func replaceUnsafeVarWithEnvvar(lines []string, replaceRegex *regexp.Regexp, envvar string, runIndex uint) {
@@ -261,4 +232,18 @@ func isParentLevelIndent(line string, parentIndent int) bool {
 		return false
 	}
 	return getIndent(line) >= parentIndent
+}
+
+// gets the changes as a git-diff. Following the standard used in git diff, the
+// path to the "old" version is prefixed with a/, and the "new" with b/:
+//
+// --- a/.github/workflows/foo.yml
+// +++ b/.github/workflows/foo.yml
+// @@ -42,13 +42,22 @@
+// ...
+func getDiff(path, original, patched string) string {
+	edits := myers.ComputeEdits(span.URIFromPath(path), original, patched)
+	aPath := "a/" + path
+	bPath := "b/" + path
+	return fmt.Sprint(gotextdiff.ToUnified(aPath, bPath, original, edits))
 }
