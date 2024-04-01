@@ -35,64 +35,50 @@ import (
 
 	"github.com/ossf/scorecard/v4/checker"
 
-	"github.com/hexops/gotextdiff"
-	"github.com/hexops/gotextdiff/myers"
-	"github.com/hexops/gotextdiff/span"
+	"github.com/go-git/go-billy/v5/memfs"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/storage/memory"
 )
 
 const (
 	assumedIndent = 2
 )
 
+// Fixes the script injection identified by the finding and returns a unified diff
+// users can apply (with `git apply` or `patch`) to fix the workflow themselves.
+// Should an error occur, it is handled and an empty patch is returned.
 func GeneratePatch(f checker.File, content string) string {
+	patchedWorkflow, ok := patchWorkflow(f, content)
+	if !ok {
+		return ""
+	}
+	return getDiff(f.Path, content, patchedWorkflow)
+}
+
+// Returns a patched version of the workflow without the script injection finding.
+func patchWorkflow(f checker.File, content string) (string, bool) {
 	unsafeVar := strings.Trim(f.Snippet, " ")
 	runCmdIndex := f.Offset - 1
 
 	lines := strings.Split(string(content), "\n")
 
-	unsafePattern, envvar, ok := getReplacementRegexAndEnvvarName(unsafeVar)
+	unsafePattern, ok := getUnsafePattern(unsafeVar)
 	if !ok {
-		return ""
+		return "", false
 	}
 
-	replaceUnsafeVarWithEnvvar(lines, unsafePattern, envvar, runCmdIndex)
-
-	lines, ok = addEnvvarsToGlobalEnv(lines, envvar, unsafeVar)
+	lines = replaceUnsafeVarWithEnvvar(lines, unsafePattern, runCmdIndex)
+	lines, ok = addEnvvarsToGlobalEnv(lines, unsafePattern, unsafeVar)
 	if !ok {
-		return ""
+		return "", false
 	}
 
-	fixedWorkflow := strings.Join(lines, "\n")
-
-	return getDiff(f.Path, content, fixedWorkflow)
+	return strings.Join(lines, "\n"), true
 }
 
-func addEnvvarsToGlobalEnv(lines []string, envvar string, unsafeVar string) ([]string, bool) {
-	globalIndentation, ok := findGlobalIndentation(lines)
-
-	if !ok {
-		// invalid workflow, could not determine global indentation
-		return nil, false
-	}
-
-	envPos, envvarIndent, exists := findExistingEnv(lines, globalIndentation)
-
-	if !exists {
-		lines, envPos, ok = addNewGlobalEnv(lines, globalIndentation)
-		if !ok {
-			return nil, ok
-		}
-
-		// position now points to `env:`, insert variables below it
-		envPos += 1
-		envvarIndent = globalIndentation + assumedIndent
-	}
-	envvarDefinition := fmt.Sprintf("%s: ${{ %s }}", envvar, unsafeVar)
-	lines = slices.Insert(lines, envPos,
-		strings.Repeat(" ", envvarIndent)+envvarDefinition)
-	return lines, ok
-}
-
+// Adds a new global environment to a workflow. Assumes a global environment does not
+// yet exist.
 func addNewGlobalEnv(lines []string, globalIndentation int) ([]string, int, bool) {
 	envPos, ok := findNewEnvPos(lines, globalIndentation)
 
@@ -106,8 +92,10 @@ func addNewGlobalEnv(lines []string, globalIndentation int) ([]string, int, bool
 	return lines, envPos, ok
 }
 
+// Identifies the "global" indentation, as defined by the indentation on the required
+// `on:` block. Will equal 0 in almost all cases.
 func findGlobalIndentation(lines []string) (int, bool) {
-	r := regexp.MustCompile(`^\W*on:`)
+	r := regexp.MustCompile(`^\s*on:`)
 	for _, line := range lines {
 		if r.MatchString(line) {
 			return getIndent(line), true
@@ -117,6 +105,14 @@ func findGlobalIndentation(lines []string) (int, bool) {
 	return -1, false
 }
 
+// Detects whether a global `env:` block already exists.
+//
+// Returns:
+//   - int: the index for the line where the `env:` block is declared
+//   - int: the indentation used for the declared environment variables
+//   - bool: whether the `env` block exists
+//
+// The first two values return -1 if the `env` block doesn't exist
 func findExistingEnv(lines []string, globalIndent int) (int, int, bool) {
 	num_lines := len(lines)
 	indent := strings.Repeat(" ", globalIndent)
@@ -139,7 +135,7 @@ func findExistingEnv(lines []string, globalIndent int) (int, int, bool) {
 	i++ // move to line after `env:`
 	envvarIndent := getIndent(lines[i])
 	// regex to detect envvars belonging to the global `env:` block
-	envvarRegex := regexp.MustCompile(indent + `\W+[^#]`)
+	envvarRegex := regexp.MustCompile(indent + `\s+[^#]`)
 	for ; i < num_lines; i++ {
 		line := lines[i]
 		if !envvarRegex.MatchString(line) {
@@ -151,6 +147,12 @@ func findExistingEnv(lines []string, globalIndent int) (int, int, bool) {
 	return i, envvarIndent, true
 }
 
+// Identifies the line where a new `env:` block should be inserted: right above the
+// `jobs:` label.
+//
+// Returns:
+//   - int: the index for the line where the `env:` block should be inserted
+//   - bool: whether the `jobs:` block was found. Should always be `true`
 func findNewEnvPos(lines []string, globalIndent int) (int, bool) {
 	// the new env is added right before `jobs:`
 	indent := strings.Repeat(" ", globalIndent)
@@ -174,8 +176,58 @@ func newUnsafePattern(e, p string) unsafePattern {
 	return unsafePattern{
 		envvarName:   e,
 		idRegex:      regexp.MustCompile(p),
-		replaceRegex: regexp.MustCompile(`{{\W*.*?` + p + `.*?\W*}}`),
+		replaceRegex: regexp.MustCompile(`{{\s*.*?` + p + `.*?\s*}}`),
 	}
+}
+
+func getUnsafePattern(unsafeVar string) (unsafePattern, bool) {
+	for _, p := range unsafePatterns {
+		if p.idRegex.MatchString(unsafeVar) {
+			p := p
+			return p, true
+		}
+	}
+	return unsafePattern{}, false
+}
+
+// Replaces all instances of the given script injection variable with the safe
+// environment variable.
+func replaceUnsafeVarWithEnvvar(lines []string, pattern unsafePattern, runIndex uint) []string {
+	runIndent := getIndent(lines[runIndex])
+	for i := int(runIndex); i < len(lines) && isParentLevelIndent(lines[i], runIndent); i++ {
+		lines[i] = pattern.replaceRegex.ReplaceAllString(lines[i], pattern.envvarName)
+	}
+
+	return lines
+}
+
+// Adds the necessary environment variable to the global `env:` block, if it exists.
+// If the `env:` block does not exist, it is created right above the `jobs:` label.
+func addEnvvarsToGlobalEnv(lines []string, pattern unsafePattern, unsafeVar string) ([]string, bool) {
+	globalIndentation, ok := findGlobalIndentation(lines)
+
+	if !ok {
+		// invalid workflow, could not determine global indentation
+		return nil, false
+	}
+
+	envPos, envvarIndent, exists := findExistingEnv(lines, globalIndentation)
+
+	if !exists {
+		lines, envPos, ok = addNewGlobalEnv(lines, globalIndentation)
+		if !ok {
+			return nil, ok
+		}
+
+		// position now points to `env:`, insert variables below it
+		envPos += 1
+		envvarIndent = globalIndentation + assumedIndent
+	}
+
+	envvarDefinition := fmt.Sprintf("%s: ${{ %s }}", pattern.envvarName, unsafeVar)
+	lines = slices.Insert(lines, envPos, strings.Repeat(" ", envvarIndent)+envvarDefinition)
+
+	return lines, ok
 }
 
 var unsafePatterns = []unsafePattern{
@@ -200,33 +252,21 @@ var unsafePatterns = []unsafePattern{
 	newUnsafePattern("HEAD_REF", `github\.head_ref`),
 }
 
-func getReplacementRegexAndEnvvarName(unsafeVar string) (*regexp.Regexp, string, bool) {
-	for _, p := range unsafePatterns {
-		if p.idRegex.MatchString(unsafeVar) {
-			return p.replaceRegex, p.envvarName, true
-		}
-	}
-	return nil, "", false
-}
-
-func replaceUnsafeVarWithEnvvar(lines []string, replaceRegex *regexp.Regexp, envvar string, runIndex uint) {
-	runIndent := getIndent(lines[runIndex])
-	for i := int(runIndex); i < len(lines) && isParentLevelIndent(lines[i], runIndent); i++ {
-		lines[i] = replaceRegex.ReplaceAllString(lines[i], envvar)
-	}
-}
-
+// Returns the indentation of the given line. The indentation is all whitespace and
+// dashes before a key or value.
 func getIndent(line string) int {
 	return len(line) - len(strings.TrimLeft(line, " -"))
 }
 
 func isBlankOrComment(line string) bool {
-	blank := regexp.MustCompile(`^\W*$`)
-	comment := regexp.MustCompile(`^\W*#`)
+	blank := regexp.MustCompile(`^\s*$`)
+	comment := regexp.MustCompile(`^\s*#`)
 
 	return blank.MatchString(line) || comment.MatchString(line)
 }
 
+// Returns true if the line's indentation matches its parent's indentation.
+// Blank lines and pure comment lines are ignored (return false).
 func isParentLevelIndent(line string, parentIndent int) bool {
 	if isBlankOrComment(line) {
 		return false
@@ -234,16 +274,81 @@ func isParentLevelIndent(line string, parentIndent int) bool {
 	return getIndent(line) >= parentIndent
 }
 
-// gets the changes as a git-diff. Following the standard used in git diff, the
-// path to the "old" version is prefixed with a/, and the "new" with b/:
-//
-// --- a/.github/workflows/foo.yml
-// +++ b/.github/workflows/foo.yml
-// @@ -42,13 +42,22 @@
-// ...
+// Returns the changes between the original and patched workflows as a unified diff
+// (the same generated by `git diff` or `diff -u`).
 func getDiff(path, original, patched string) string {
-	edits := myers.ComputeEdits(span.URIFromPath(path), original, patched)
-	aPath := "a/" + path
-	bPath := "b/" + path
-	return fmt.Sprint(gotextdiff.ToUnified(aPath, bPath, original, edits))
+	// initialize an in-memory repository
+	repo := newInMemoryRepo()
+	if repo == nil {
+		return ""
+	}
+
+	// commit original workflow to in-memory repository
+	originalCommit := commitWorkflow(path, original, repo)
+	if originalCommit == nil {
+		return ""
+	}
+
+	// commit patched workflow to in-memory repository
+	patchedCommit := commitWorkflow(path, patched, repo)
+	if patchedCommit == nil {
+		return ""
+	}
+
+	return toUnifiedDiff(originalCommit, patchedCommit)
+}
+
+// Initializes an in-memory repository
+func newInMemoryRepo() *git.Repository {
+	// initialize an in-memory repository
+	filesystem := memfs.New()
+	repo, err := git.Init(memory.NewStorage(), filesystem)
+	if err != nil {
+		return nil
+	}
+
+	return repo
+}
+
+// Commits the workflow at the given path to the in-memory repository
+func commitWorkflow(path, contents string, repo *git.Repository) *object.Commit {
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return nil
+	}
+	filesystem := worktree.Filesystem
+
+	// create (or overwrite) file
+	df, err := filesystem.Create(path)
+	if err != nil {
+		return nil
+	}
+
+	df.Write([]byte(contents))
+	df.Close()
+
+	// commit file to in-memory repository
+	worktree.Add(path)
+	hash, err := worktree.Commit("x", &git.CommitOptions{})
+	if err != nil {
+		return nil
+	}
+
+	commit, err := repo.CommitObject(hash)
+	if err != nil {
+		return nil
+	}
+	return commit
+}
+
+// Returns a unified diff describing the difference between the given commits
+func toUnifiedDiff(originalCommit, patchedCommit *object.Commit) string {
+	patch, err := originalCommit.Patch(patchedCommit)
+	if err != nil {
+		return ""
+	}
+	builder := strings.Builder{}
+	patch.Encode(&builder)
+
+	return builder.String()
 }
